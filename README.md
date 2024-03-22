@@ -1,6 +1,6 @@
 # About
 
-Service Bus defferals.
+Service Bus deferrals.
 
 ## Context
 

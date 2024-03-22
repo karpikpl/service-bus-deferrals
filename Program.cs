@@ -1,48 +1,61 @@
-﻿using System;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
+﻿// about bulk import: https://learn.microsoft.com/en-us/azure/cosmos-db/nosql/tutorial-dotnet-bulk-import
+
+using System.Reflection;
+using Azure.Core.Extensions;
+using Azure.Identity;
 using Azure.Messaging.ServiceBus;
+using DeferralDemo;
+using Microsoft.Extensions.Azure;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
-class Program
+
+string? directoryName = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+
+await Host.CreateDefaultBuilder(args)
+.ConfigureAppConfiguration((env, config) =>
 {
-    const string connectionString = "<your_connection_string>";
-    const string queueName = "<your_queue_name>";
-
-    static async Task Main(string[] args)
+    var appAssembly = Assembly.Load(new AssemblyName(env.HostingEnvironment.ApplicationName));
+    if (appAssembly != null)
     {
-        await using var client = new ServiceBusClient(connectionString);
-
-        // create a processor that we can use to process the messages
-        ServiceBusProcessor processor = client.CreateProcessor(queueName, new ServiceBusProcessorOptions());
-
-        // add handler to process messages
-        processor.ProcessMessageAsync += MessageHandler;
-
-        // add handler to process any errors
-        processor.ProcessErrorAsync += ErrorHandler;
-
-        // start processing 
-        await processor.StartProcessingAsync();
-
-        Console.WriteLine("Press any key to stop the processing");
-        Console.ReadKey();
-
-        // stop processing 
-        await processor.StopProcessingAsync();
+        config.AddUserSecrets(appAssembly, optional: true);
     }
 
-    static Task MessageHandler(ProcessMessageEventArgs args)
+    config.AddJsonFile("appsettings.json");
+    config.AddJsonFile("appsettings.Development.json", optional: true);
+    config.AddEnvironmentVariables();
+})
+.UseContentRoot(directoryName != null ? directoryName : string.Empty)
+.ConfigureLogging(logging =>
+{
+})
+.ConfigureServices((hostContext, services) =>
+{
+    services.AddAzureClients(clientBuilder =>
     {
-        string body = args.Message.Body.ToString();
-        Console.WriteLine($"Received: {body}");
+        ServiceBusOptions? sbOptions = hostContext.Configuration.GetSection(ServiceBusOptions.ServiceBus).Get<ServiceBusOptions>();
 
-        return Task.CompletedTask;
-    }
+        if (sbOptions != null)
+        {
+            services.AddSingleton(sbOptions);
 
-    static Task ErrorHandler(ProcessErrorEventArgs args)
-    {
-        Console.WriteLine(args.Exception.ToString());
-        return Task.CompletedTask;
-    }
-}
+            if (string.IsNullOrEmpty(sbOptions.ConnectionString))
+                throw new InvalidOperationException(@$"The Azure Service Bus connection string is not configured; the configuration setting is either not specified or does not have a value.");
+
+            IAzureClientBuilder<ServiceBusClient, ServiceBusClientOptions> acb;
+            if (sbOptions.ConnectionString.Contains("SharedAccessKey=", StringComparison.OrdinalIgnoreCase))
+                acb = clientBuilder.AddServiceBusClient(sbOptions.ConnectionString); // Connect to Azure Service Bus with secret.
+            else
+                acb = clientBuilder.AddServiceBusClientWithNamespace(sbOptions.ConnectionString).WithCredential(new DefaultAzureCredential()); // Connect to Azure Service Bus with managed identity.
+        }
+        else
+        {
+            throw new ArgumentNullException($"${ServiceBusOptions.ServiceBus} in appsettings.json cannot be null.");
+        }
+    });
+
+
+    services.AddHostedService<ConsoleHostedService>();
+})
+.RunConsoleAsync();
